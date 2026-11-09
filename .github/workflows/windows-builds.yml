@@ -9,6 +9,9 @@
 name: windows-builds
 
 on:
+  # a push to this branch builds it (a fork's workflow_dispatch needs the file on the default branch)
+  push:
+    branches: [windows-arm64]
   workflow_dispatch:
     inputs:
       ref:
@@ -41,11 +44,11 @@ jobs:
       run:
         shell: bash
     env:
-      VERSION: ${{ inputs.version }}
+      VERSION: ${{ inputs.version || '0.1.0-win.1' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           submodules: true
           lfs: false
       # the ARM64 image may come without rustup: the native one, then the pinned toolchain (rust-toolchain.toml)
@@ -141,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: v${{ inputs.version }}
+      TAG: v${{ inputs.version || '0.1.0-win.1' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -151,5 +154,5 @@ jobs:
         run: |
           ls -la dist
           ls dist/*.zip >/dev/null 2>&1 || { echo "no zip built"; exit 1; }
-          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" --title "raea ${TAG#v} (Windows builds, fork)" --notes "Windows ARM64 and x86_64 builds of raea from ${{ inputs.ref }}, made by .github/workflows/windows-builds.yml in this fork. Install: tools/windows/install.ps1 with RAEA_REPO=$GITHUB_REPOSITORY."
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" --title "raea ${TAG#v} (Windows builds, fork)" --notes "Windows ARM64 and x86_64 builds of raea from ${{ inputs.ref || github.ref_name }}, made by .github/workflows/windows-builds.yml in this fork. Install: tools/windows/install.ps1 with RAEA_REPO=$GITHUB_REPOSITORY."
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/*.zip dist/*.zip.sha256 --clobber
