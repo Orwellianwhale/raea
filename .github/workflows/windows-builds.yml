@@ -30,6 +30,11 @@ permissions:
   id-token: write
   attestations: write
 
+# a newer push to the same branch replaces a build still running
+concurrency:
+  group: windows-builds-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -62,9 +67,11 @@ jobs:
           fi
           rustup toolchain install
           rustc -vV
+      # kept when a build fails too, so a fix-and-retry recompiles only what changed
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.arch }}
+          cache-on-failure: true
       # jq that writes LF (as upstream), downloaded where the image has none (jqlang's x86_64 build runs under emulation)
       - name: jq
         run: |
