@@ -1,0 +1,155 @@
+# Fork: Windows builds of raea for Windows on ARM (native ARM64) and x86_64, from any ref, on GitHub's own runners.
+# Upstream's release.yml builds Windows x86_64 only, and its recent releases have no Windows build; this workflow
+# builds both from the same source and publishes them as a pre-release of this fork, which tools/windows/install.ps1
+# reads (RAEA_REPO=<this fork>). Run it by hand: Actions → windows-builds → Run workflow.
+#
+# The skills gate is upstream's to run (it reads their private feed app), so it's skipped (RAEA_SKILLS_GATE=skip): this
+# fork doesn't change the skills. The x86_64 zip is checked by tools/release-check.sh on Mesa's lavapipe, as upstream;
+# the ARM64 runner has no GPU and no lavapipe of its architecture here, so its zip is checked on a real ARM machine.
+name: windows-builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: the commit, branch or tag to build
+        required: true
+        default: windows-arm64
+        type: string
+      version:
+        description: the version to call it (the release is v<version>)
+        required: true
+        default: 0.1.0-win.1
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc }
+          - { os: windows-latest, arch: x86_64, triple: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: true
+          lfs: false
+      # the ARM64 image may come without rustup: the native one, then the pinned toolchain (rust-toolchain.toml)
+      - name: Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -fsSL -o "$RUNNER_TEMP/rustup-init.exe" "https://static.rust-lang.org/rustup/dist/${{ matrix.triple }}/rustup-init.exe"
+            "$RUNNER_TEMP/rustup-init.exe" -y --default-toolchain none --profile minimal
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
+          rustc -vV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+      # jq that writes LF (as upstream), downloaded where the image has none (jqlang's x86_64 build runs under emulation)
+      - name: jq
+        run: |
+          mkdir -p "$RUNNER_TEMP/jq" "$RUNNER_TEMP/jqbin"
+          j=$(command -v jq || true)
+          if [ -z "$j" ]; then
+            curl -fsSL -o "$RUNNER_TEMP/jqbin/jq.exe" https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-windows-amd64.exe
+            j="$RUNNER_TEMP/jqbin/jq.exe"
+          fi
+          printf '#!/bin/bash\nexec "%s" -b "$@"\n' "$j" > "$RUNNER_TEMP/jq/jq"
+          chmod +x "$RUNNER_TEMP/jq/jq"
+          echo "$RUNNER_TEMP/jq" >> "$GITHUB_PATH"
+      - uses: oven-sh/setup-bun@v2
+        id: bun
+        continue-on-error: true
+        with:
+          bun-version: 1.4.2
+      # where setup-bun has no build for the runner: bun's own x86_64 baseline build, under emulation
+      - name: bun (fallback)
+        if: steps.bun.outcome != 'success'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-windows-x64-baseline.zip
+          mkdir -p "$RUNNER_TEMP/bun" && cd "$RUNNER_TEMP/bun" && unzip -q ../bun.zip
+          echo "$(cygpath -w "$RUNNER_TEMP/bun/bun-windows-x64-baseline")" >> "$GITHUB_PATH"
+      - name: The runtime's packages
+        run: for d in sdk/react/js sdk/react/tw; do (cd "$d" && bun install --frozen-lockfile); done
+      - name: Models (pinned by URL and sha256 in tools/release/models.tsv)
+        run: |
+          while IFS=$'\t' read -r path url sha; do
+            case $path in ''|'#'*) continue ;; esac
+            mkdir -p "$HOME/.local/share/raea-models/$(dirname "$path")"
+            curl -fsSL "$url" -o "$HOME/.local/share/raea-models/$path"
+            echo "$sha  $HOME/.local/share/raea-models/$path" | sha256sum -c -
+          done < <(tr -d '\r' < tools/release/models.tsv)
+      - name: Build
+        run: |
+          feat=$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)
+          cargo build --profile dist --locked -p raea-cli --bin raea --no-default-features --features "$feat"
+          cargo build --profile dist --locked -p raea-rune-host
+          cargo build --profile dist --locked -p raea-page-host --features window
+          cargo build --profile dist --locked -p raea-perceive
+      - name: What raea.exe imports
+        run: |
+          { echo "### ${{ matrix.arch }}: what raea.exe, raea_bundle.dll and raea-perceive.exe import"; echo '```'
+            dumpbin=$(ls "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe | head -1)
+            "$dumpbin" -nologo -dependents -headers target/dist/raea.exe | grep -iE 'machine|\.dll$' | sed 's/^ *//'
+            "$dumpbin" -nologo -dependents target/dist/raea_bundle.dll target/dist/raea-perceive.exe | grep -iE '\.dll$|Dump of' | sed 's/^ *//'
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: Software Vulkan (x86_64 only)
+        if: matrix.arch == 'x86_64'
+        run: bash tools/release/lavapipe.sh
+      - name: Pack and check (tools/release.sh)
+        env:
+          RAEA_SKILLS_GATE: skip
+          RAEA_RELEASE_CHECK: ${{ matrix.arch == 'arm64' && 'skip' || '' }}
+          RAEA_CHECK_DIR: ${{ runner.temp }}/release-check
+        run: bash tools/release.sh "$VERSION" target/dist HEAD
+      - uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: dist/raea-*.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            dist/raea-*.zip
+            dist/raea-*.zip.sha256
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: ignore
+
+  # both zips (or whichever built) on one pre-release of this fork
+  publish:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        run: |
+          ls -la dist
+          ls dist/*.zip >/dev/null 2>&1 || { echo "no zip built"; exit 1; }
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" --title "raea ${TAG#v} (Windows builds, fork)" --notes "Windows ARM64 and x86_64 builds of raea from ${{ inputs.ref }}, made by .github/workflows/windows-builds.yml in this fork. Install: tools/windows/install.ps1 with RAEA_REPO=$GITHUB_REPOSITORY."
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/*.zip dist/*.zip.sha256 --clobber

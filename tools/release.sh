@@ -36,9 +36,12 @@ cd "$root"
 out=$root/dist
 case $(uname -s) in
   Linux) platform=linux-x86_64 ;;
-  MINGW*|MSYS*|CYGWIN*) platform=windows-x86_64 ;;
+  # Windows on ARM (fork): the host Rust builds for names the build, so an ARM64 runner packs windows-arm64
+  MINGW*|MSYS*|CYGWIN*) case $(rustc -vV 2>/dev/null | sed -n 's/^host: //p') in aarch64-*) platform=windows-arm64 ;; *) platform=windows-x86_64 ;; esac ;;
   *) platform=macos-arm64 ;;
 esac
+# RAEA_PLATFORM overrides it (fork)
+platform=${RAEA_PLATFORM:-$platform}
 name=raea-$version-$platform
 stage=$(mktemp -d)/raea
 mkdir -p "$stage/bin" "$stage/share/raea" "$out"
@@ -51,7 +54,7 @@ untar() {
   local err rc=0
   err=$(tar -x -C "$1" 2>&1 >/dev/null) || rc=$?
   [ $rc -eq 0 ] && return 0
-  if [ "$platform" = windows-x86_64 ] && ! grep -v -e "Cannot create symlink" -e "Exiting with failure status" <<< "$err" | grep -q .; then
+  if [[ $platform == windows-* ]] && ! grep -v -e "Cannot create symlink" -e "Exiting with failure status" <<< "$err" | grep -q .; then
     echo "release.sh: note: the skills gate left out $(grep -c "Cannot create symlink" <<< "$err") symlinks (Windows makes none)"
     return 0
   fi
@@ -72,7 +75,10 @@ skills_at() {
   # its skills/ folder alone: the repo's root holds a symlink (AGENTS.md) that Windows' tar can't make, and nothing reads it
   mkdir -p "$1" && git -C skills archive "$pin" skills | tar -x -C "$1"
 }
-if [ ! -f "$root/apps/app/src/acp/protocol.ts" ]; then
+if [ "${RAEA_SKILLS_GATE:-}" = skip ]; then
+  # a fork's own build (Windows on ARM): the skills are upstream's, unchanged, so their gate is upstream's to run
+  echo "release.sh: note: RAEA_SKILLS_GATE=skip, so the skills gate isn't run here (a fork build of upstream's skills)"
+elif [ ! -f "$root/apps/app/src/acp/protocol.ts" ]; then
   [ -n "${RAEA_SKILLS_PASSED:-}" ] || { echo "release.sh: no feed app here (apps/app), so the skills gate can't run; run tools/skills.sh check in a checkout with the feed app, then name the commit it passed on as RAEA_SKILLS_PASSED (release.yml: a \"skills-passed: <sha>\" line in the annotated tag's message, or the skills_passed input when run by hand)" >&2; exit 1; }
   git rev-parse -q --verify "$RAEA_SKILLS_PASSED^{commit}" >/dev/null || { echo "release.sh: RAEA_SKILLS_PASSED=$RAEA_SKILLS_PASSED isn't a commit here (a full SHA, fetched)" >&2; exit 1; }
   git diff --quiet "$RAEA_SKILLS_PASSED" "$ref" -- "${gate_inputs[@]}" \
@@ -113,13 +119,14 @@ Install a CJK font for Japanese, Chinese and Korean text (Debian and Ubuntu: apt
 An app's window, on either target (raea app run, raea-rune-host and raea-page-host), needs a display (X11 or
 Wayland; Xvfb on a server, as raea app check does there too), libxkbcommon-x11, the X client libraries and the Vulkan
 loader (Debian and Ubuntu: apt install libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 libx11-xcb1 libvulkan1)." > "$stage/README" ;;
-  windows-x86_64)
+  windows-*)
+    arch=${platform#windows-}; redist=x64; [ "$arch" = arm64 ] && redist=arm64
     cp "$bin/raea.exe" "$bin/raea_bundle.dll" "$bin/raea-perceive.exe" "$bin/raea-rune-host.exe" "$bin/raea-page-host.exe" "$stage/bin/"
     # the C runtime isn't in the zip (ort's ONNX Runtime needs its DLLs, and they're Microsoft's to ship): the VC++
     # redistributable, which most Windows machines already have, provides it
-    printf '%s\r\n' "raea $version for Windows x86_64 (Windows 10 or 11, a DirectX 12 or Vulkan GPU driver; with no GPU, Mesa's lavapipe and WGPU_BACKEND=vulkan)." \
-      "It needs the Microsoft Visual C++ Redistributable (x64), which most machines already have:" \
-      "https://aka.ms/vs/17/release/vc_redist.x64.exe" > "$stage/README.txt" ;;
+    printf '%s\r\n' "raea $version for Windows $arch (Windows 10 or 11, a DirectX 12 or Vulkan GPU driver; with no GPU, Mesa's lavapipe and WGPU_BACKEND=vulkan)." \
+      "It needs the Microsoft Visual C++ Redistributable ($redist), which most machines already have:" \
+      "https://aka.ms/vs/17/release/vc_redist.$redist.exe" > "$stage/README.txt" ;;
   *) cp "$bin/raea" "$bin/libraea_bundle.dylib" "$bin/raea-perceive" "$bin/raea-rune-host" "$bin/raea-page-host" "$stage/bin/" ;;
 esac
 # the packages sdk/tsconfig.base.json lists (@raea/<name>: its sources and package.json), which the bundlers resolve by it
@@ -162,15 +169,20 @@ printf '%s\n' "$version" > "$stage/share/raea/VERSION"
 for md in "$stage"/share/raea/skills/*/SKILL.md; do
   perl -0pi -e 's/\A---\n(.*?)\n---\n/"---\n" . join("\n", grep { !\/^version:\/ } split(\/\n\/, $1)) . "\nversion: '"$version"'\n---\n"/se' "$md"
 done
-if [ $platform = windows-x86_64 ]; then
+if [[ $platform == windows-* ]]; then
   archive=$name.zip
   rm -f "$out/$archive"
-  (cd "$(dirname "$stage")" && 7z a -tzip -bso0 -bsp0 "$out/$archive" raea)
+  # 7-Zip where the runner has it, else Windows' own bsdtar (fork: the ARM64 runner's image may have no 7-Zip)
+  if command -v 7z >/dev/null; then (cd "$(dirname "$stage")" && 7z a -tzip -bso0 -bsp0 "$out/$archive" raea)
+  else (cd "$(dirname "$stage")" && "$SYSTEMROOT/System32/tar.exe" -a -cf "$(cygpath -w "$out/$archive")" raea); fi
 else
   archive=$name.tar.gz
   tar -C "$(dirname "$stage")" -czf "$out/$archive" raea
 fi
 (cd "$out" && if command -v sha256sum >/dev/null; then sha256sum "$archive"; else shasum -a 256 "$archive"; fi > "$archive.sha256")
 rm -rf "$(dirname "$stage")"
-bash "$root/tools/release-check.sh" "$out/$archive"
+# RAEA_RELEASE_CHECK=skip (fork): a runner that can't render (no GPU and no software Vulkan for its architecture); the
+# zip is then checked on a real machine with tools/release-check.sh
+if [ "${RAEA_RELEASE_CHECK:-}" = skip ]; then echo "release.sh: note: RAEA_RELEASE_CHECK=skip, the archive isn't checked here"
+else bash "$root/tools/release-check.sh" "$out/$archive"; fi
 echo "release: $out/$archive ($(du -h "$out/$archive" | cut -f1))"
