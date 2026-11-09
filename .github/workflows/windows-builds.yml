@@ -36,9 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # cflags: metis-sys 0.3.2's GKlib ships gk_ms_stdint.h, whose int_fast16_t clashes with MSVC 14.51's stdint.h (VS 18 on the
-          # ARM64 image; C2371): use the compiler's own stdint.h and skip GKlib's copy
-          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc, cflags: '-D_MSC_STDINT_H_ /FIstdint.h' }
+          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc }
           - { os: windows-latest, arch: x86_64, triple: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
@@ -101,9 +99,22 @@ jobs:
             curl -fsSL "$url" -o "$HOME/.local/share/raea-models/$path"
             echo "$sha  $HOME/.local/share/raea-models/$path" | sha256sum -c -
           done < <(tr -d '\r' < tools/release/models.tsv)
+      # metis-sys 0.3.2's GKlib ships its own gk_ms_stdint.h, whose int_fast16_t clashes with MSVC 14.51's stdint.h (VS 18,
+      # on the ARM64 image: C2371). Its copy is swapped for the compiler's own header, in that crate's fetched sources only
+      # (a CFLAGS fix reaches every C crate, and ring compiles with clang)
+      - name: GKlib's stdint for a current MSVC
+        run: |
+          cargo fetch --locked
+          for h in "$USERPROFILE"/.cargo/registry/src/*/metis-sys-*/vendor/GKlib/gk_ms_stdint.h; do
+            [ -f "$h" ] || continue
+            printf '#ifndef _MSC_STDINT_H_
+#define _MSC_STDINT_H_
+#include <stdint.h>
+#endif
+' > "$h"
+            echo "patched $h"; cat "$h"
+          done
       - name: Build
-        env:
-          CFLAGS_aarch64_pc_windows_msvc: ${{ matrix.cflags }}
         run: |
           feat=$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)
           cargo build --profile dist --locked -p raea-cli --bin raea --no-default-features --features "$feat"
