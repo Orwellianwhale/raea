@@ -107,8 +107,7 @@ jobs:
           cargo fetch --locked
           for h in "$USERPROFILE"/.cargo/registry/src/*/metis-sys-*/vendor/GKlib/gk_ms_stdint.h; do
             [ -f "$h" ] || continue
-            printf '%s
-' '#ifndef _MSC_STDINT_H_' '#define _MSC_STDINT_H_' '#include <stdint.h>' '#endif' > "$h"
+            printf '%s\n' '#ifndef _MSC_STDINT_H_' '#define _MSC_STDINT_H_' '#include <stdint.h>' '#endif' > "$h"
             echo "patched $h"; cat "$h"
           done
       - name: Build
