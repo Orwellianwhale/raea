@@ -41,7 +41,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc }
           - { os: windows-latest, arch: x86_64, triple: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
