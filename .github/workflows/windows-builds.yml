@@ -36,7 +36,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc }
+          # cflags: metis-sys 0.3.2's GKlib ships gk_ms_stdint.h, whose int_fast16_t clashes with MSVC 14.51's stdint.h (VS 18 on the
+          # ARM64 image; C2371): use the compiler's own stdint.h and skip GKlib's copy
+          - { os: windows-11-arm, arch: arm64, triple: aarch64-pc-windows-msvc, cflags: '-D_MSC_STDINT_H_ /FIstdint.h' }
           - { os: windows-latest, arch: x86_64, triple: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
@@ -100,6 +102,8 @@ jobs:
             echo "$sha  $HOME/.local/share/raea-models/$path" | sha256sum -c -
           done < <(tr -d '\r' < tools/release/models.tsv)
       - name: Build
+        env:
+          CFLAGS_aarch64_pc_windows_msvc: ${{ matrix.cflags }}
         run: |
           feat=$(bash tools/bevy-plugins.sh features sdk/raea/bench/bevy-plugins)
           cargo build --profile dist --locked -p raea-cli --bin raea --no-default-features --features "$feat"
